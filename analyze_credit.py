@@ -228,6 +228,42 @@ def plot_results(df: pd.DataFrame, output_dir: Path):
     print(f"Saved plots to {output_dir / 'credit_analysis.png'}")
 
 
+def analyze_by_token_type_with_position_control(df: pd.DataFrame) -> Dict:
+    """
+    Analyze credit by token type, controlling for position.
+    This avoids the confound where filler appears early and reasoning appears late.
+    """
+    if 'token_type' not in df.columns:
+        return {}
+
+    # Get relative position for each token
+    episode_lengths = df.groupby(['step', 'episode_idx'])['token_position'].max() + 1
+    df_with_len = df.merge(
+        episode_lengths.reset_index().rename(columns={'token_position': 'episode_length'}),
+        on=['step', 'episode_idx']
+    )
+    df_with_len['relative_position'] = df_with_len['token_position'] / df_with_len['episode_length']
+    df_with_len['position_bin'] = pd.cut(df_with_len['relative_position'], bins=5, labels=['0-20%', '20-40%', '40-60%', '60-80%', '80-100%'])
+
+    # Compare token types within each position bin
+    results = {}
+    for pos_bin in df_with_len['position_bin'].unique():
+        if pd.isna(pos_bin):
+            continue
+        subset = df_with_len[df_with_len['position_bin'] == pos_bin]
+        results[str(pos_bin)] = {}
+        for token_type in subset['token_type'].unique():
+            type_subset = subset[subset['token_type'] == token_type]
+            if len(type_subset) > 0:
+                results[str(pos_bin)][token_type] = {
+                    'count': len(type_subset),
+                    'mean_abs_contribution': type_subset['contribution'].abs().mean(),
+                    'mean_log_prob': type_subset['log_prob'].mean(),
+                }
+
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description='Analyze credit assignment logs')
     parser.add_argument('--log_path', type=str, required=True,
@@ -283,6 +319,44 @@ def main():
     consistency = analyze_contribution_consistency(df)
     for k, v in consistency.items():
         print(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
+
+    # Token type analysis (if tokenizer provided)
+    if args.tokenizer_path:
+        print("\n### Token Type Analysis ###")
+        from tokenizer import Tokenizer
+        tokenizer = Tokenizer(args.tokenizer_path)
+
+        print("Decoding tokens...")
+        df['token_text'] = df['token_id'].apply(lambda x: tokenizer.detokenize([x]))
+        df['token_type'] = df['token_text'].apply(classify_token)
+
+        # Overall token type stats
+        print("\nOverall by token type:")
+        for token_type in ['filler', 'reasoning', 'structure']:
+            subset = df[df['token_type'] == token_type]
+            if len(subset) > 0:
+                print(f"\n  {token_type.upper()} ({len(subset)} tokens, {100*len(subset)/len(df):.1f}%):")
+                print(f"    mean |contribution|: {subset['contribution'].abs().mean():.6f}")
+                print(f"    mean log_prob: {subset['log_prob'].mean():.4f}")
+                print(f"    mean contribution: {subset['contribution'].mean():.6f}")
+
+        # Position-controlled comparison
+        print("\n### Token Type by Position (Controlled) ###")
+        pos_controlled = analyze_by_token_type_with_position_control(df)
+        for pos_bin in ['0-20%', '20-40%', '40-60%', '60-80%', '80-100%']:
+            if pos_bin in pos_controlled:
+                print(f"\n  Position {pos_bin}:")
+                for token_type, stats in pos_controlled[pos_bin].items():
+                    print(f"    {token_type}: |contrib|={stats['mean_abs_contribution']:.4f}, "
+                          f"log_prob={stats['mean_log_prob']:.4f}, n={stats['count']}")
+
+        # Show some example tokens
+        print("\n### Example Tokens by Type ###")
+        for token_type in ['filler', 'reasoning', 'structure']:
+            subset = df[df['token_type'] == token_type]
+            if len(subset) > 0:
+                examples = subset['token_text'].value_counts().head(10)
+                print(f"\n  {token_type.upper()} top tokens: {list(examples.index)}")
 
     # Generate plots
     output_dir = Path(args.output_dir)
