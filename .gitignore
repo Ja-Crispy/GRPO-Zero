@@ -172,3 +172,22 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# ===========================================
+# Credit Assignment Experiment
+# ===========================================
+
+# Model weights (download from HuggingFace)
+Qwen3-0.6B/
+Qwen3-1.7B/
+Qwen2.5-*/
+
+# Dataset (download from HuggingFace)
+Countdown-Tasks-3to4/
+
+# Training outputs
+*.pkl
+ckpt*/
+logs*/
+credit_logs*/
+analysis_output/

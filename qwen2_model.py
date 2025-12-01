@@ -308,28 +308,29 @@ class Transformer(nn.Module):
         config_file = Path(ckpt_path) / "config.json"
         with open(config_file, "r") as f:
             config = json.load(f)
+        # Use .get() with defaults for Qwen3 compatibility
         args = Qwen2Config(
-            attention_dropout=config["attention_dropout"],
-            bos_token_id=config["bos_token_id"],
-            eos_token_id=config["eos_token_id"],
-            hidden_act=config["hidden_act"],
+            attention_dropout=config.get("attention_dropout", 0.0),
+            bos_token_id=config.get("bos_token_id", 151643),
+            eos_token_id=config.get("eos_token_id", 151645),
+            hidden_act=config.get("hidden_act", "silu"),
             hidden_size=config["hidden_size"],
-            initializer_range=config["initializer_range"],
+            initializer_range=config.get("initializer_range", 0.02),
             intermediate_size=config["intermediate_size"],
-            max_position_embeddings=config["max_position_embeddings"],
-            max_window_layers=config["max_window_layers"],
-            model_type=config["model_type"],
+            max_position_embeddings=config.get("max_position_embeddings", 32768),
+            max_window_layers=config.get("max_window_layers", 70),
+            model_type=config.get("model_type", "qwen2"),
             num_hidden_layers=config["num_hidden_layers"],
             num_attention_heads=config["num_attention_heads"],
-            num_key_value_heads=config["num_key_value_heads"],
+            num_key_value_heads=config.get("num_key_value_heads", config["num_attention_heads"]),
             vocab_size=config["vocab_size"],
-            rms_norm_eps=config["rms_norm_eps"],
-            rope_theta=config["rope_theta"],
-            sliding_window=config["sliding_window"],
-            use_sliding_window=config["use_sliding_window"],
-            use_cache=config["use_cache"],
-            tie_word_embeddings=config["tie_word_embeddings"],
-            torch_dtype=config["torch_dtype"],
+            rms_norm_eps=config.get("rms_norm_eps", 1e-6),
+            rope_theta=config.get("rope_theta", 1000000.0),
+            sliding_window=config.get("sliding_window", 32768),
+            use_sliding_window=config.get("use_sliding_window", False),
+            use_cache=config.get("use_cache", True),
+            tie_word_embeddings=config.get("tie_word_embeddings", True),
+            torch_dtype=config.get("torch_dtype", "bfloat16"),
         )
         with torch.device("meta"):
             model = cls(params=args, device=device)

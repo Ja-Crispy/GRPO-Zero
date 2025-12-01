@@ -1,0 +1,35 @@
+model:
+  # Qwen3 models (better reasoning capability)
+  # Options:
+  #   - Qwen3-0.6B       (fast iteration, ~1.5GB VRAM)
+  #   - Qwen3-0.6B-Base  (no instruction tuning)
+  #   - Qwen3-1.7B       (better capability, ~4GB VRAM)
+  #   - Qwen3-1.7B-Base  (no instruction tuning)
+  pretrained_model_path: "Qwen3-0.6B"
+  device: "cuda"
+  dtype: "bfloat16"
+data:
+  path: "Countdown-Tasks-3to4"
+  test_size: 128
+training:
+  random_seed: 1337
+  max_prompt_len: 256
+  max_gen_len: 512  # Shorter for faster iteration
+  # Smaller batch for 0.5B model on 24GB GPU
+  batch_size: 64
+  num_questions_per_batch: 8
+  micro_batch_size: 4
+  max_grad_norm: 1.0
+  learning_rate: 5.0e-6  # Lower LR for small model
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  ckpt_dir: "ckpt_instrumented"
+  log_dir: "logs_instrumented"
+  skip_unfinished_episodes: false
+  ckpt_save_interval: 50
+  eval_interval: 10
+  memory_efficient_adamw: true
+  # Credit assignment specific
+  credit_log_dir: "credit_logs"
+  credit_save_interval: 10  # Save credit logs every N steps
+  max_steps: 100  # Stop after 100 steps for quick experiment

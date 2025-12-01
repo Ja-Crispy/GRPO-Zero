@@ -1,0 +1,30 @@
+model:
+  # Qwen3-1.7B - better capability, needs more VRAM
+  pretrained_model_path: "Qwen3-1.7B"
+  device: "cuda"
+  dtype: "bfloat16"
+data:
+  path: "Countdown-Tasks-3to4"
+  test_size: 128
+training:
+  random_seed: 1337
+  max_prompt_len: 256
+  max_gen_len: 512
+  # Smaller batch for 1.7B model
+  batch_size: 32
+  num_questions_per_batch: 4
+  micro_batch_size: 2
+  max_grad_norm: 1.0
+  learning_rate: 3.0e-6  # Lower LR for larger model
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  ckpt_dir: "ckpt_qwen3_1.7B"
+  log_dir: "logs_qwen3_1.7B"
+  skip_unfinished_episodes: false
+  ckpt_save_interval: 50
+  eval_interval: 10
+  memory_efficient_adamw: true
+  # Credit assignment specific
+  credit_log_dir: "credit_logs_1.7B"
+  credit_save_interval: 10
+  max_steps: 100
