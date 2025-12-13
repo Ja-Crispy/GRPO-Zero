@@ -233,6 +233,15 @@ def main(args):
             f"len: {mean_response_len:.0f}"
         )
 
+        # Print sample output every 5 steps
+        if step % 5 == 0 and episodes:
+            sample = episodes[0]
+            print(f"\n--- Sample output (step {step}, reward={sample.reward:.2f}) ---")
+            # Show just the generated part, truncated
+            gen_text = sample.text[len(sample.prefix):][:500]
+            print(gen_text)
+            print(f"--- End sample ---\n")
+
         if step % config["training"]["eval_interval"] == 0:
             eval_success_rate = evaluate(model, tokenizer, device, dtype, config)
             print(f"\rEval success rate: {eval_success_rate:.2f}" + " " * 100)
