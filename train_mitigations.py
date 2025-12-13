@@ -81,8 +81,8 @@ def main(args):
         "attention_credit": {
             "credit_scale": args.credit_scale,
         },
-        "entropy_masking": {
-            "mask_percentile": args.mask_percentile,
+        "entropy_weighted": {
+            "entropy_temp": args.entropy_temp,
         },
     }
 
@@ -195,8 +195,8 @@ def main(args):
         elif mitigation == "attention_credit":
             update_kwargs["tokenizer"] = tokenizer
             update_kwargs["credit_scale"] = args.credit_scale
-        elif mitigation == "entropy_masking":
-            update_kwargs["mask_percentile"] = args.mask_percentile
+        elif mitigation == "entropy_weighted":
+            update_kwargs["entropy_temp"] = args.entropy_temp
 
         results = update_policy(**update_kwargs)
         torch.cuda.synchronize()
@@ -289,7 +289,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="config_instrumented.yaml",
                         help="Path to config file")
     parser.add_argument("--mitigation", type=str, default="none",
-                        choices=["none", "standard", "outcome_conditional", "inverse_logprob", "attention_credit", "entropy_masking"],
+                        choices=["none", "standard", "outcome_conditional", "inverse_logprob", "attention_credit", "entropy_weighted"],
                         help="Credit assignment mitigation to use")
 
     # Outcome-conditional parameters
@@ -304,9 +304,9 @@ if __name__ == "__main__":
     parser.add_argument("--credit_scale", type=float, default=2.0,
                         help="Scale factor for attention credit (attention_credit)")
 
-    # Entropy masking parameters
-    parser.add_argument("--mask_percentile", type=float, default=80.0,
-                        help="Percentile of low-entropy tokens to mask (entropy_masking)")
+    # Entropy weighting parameters
+    parser.add_argument("--entropy_temp", type=float, default=1.0,
+                        help="Temperature for entropy weighting - lower=more focus on high-entropy (entropy_weighted)")
 
     args = parser.parse_args()
     main(args)

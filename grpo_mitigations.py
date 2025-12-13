@@ -613,10 +613,10 @@ def update_policy_attention_credit(
 
 
 # ============================================================
-# Mitigation 4: Entropy-Based Masking (from paper 2506.01939)
+# Mitigation 4: Entropy-Based Weighting (inspired by paper 2506.01939)
 # ============================================================
 
-def update_policy_entropy_masking(
+def update_policy_entropy_weighted(
     model,
     optimizer,
     episodes: List[Episode],
@@ -627,21 +627,23 @@ def update_policy_entropy_masking(
     dtype: torch.dtype,
     step: int = 0,
     log_tokens: bool = True,
-    mask_percentile: float = 80.0,  # Mask bottom X% entropy tokens (paper uses 80%)
+    entropy_temp: float = 1.0,  # Temperature for entropy weighting (higher = more uniform)
 ):
     """
-    GRPO update with Entropy-Based Masking.
+    GRPO update with Entropy-Based Soft Weighting.
 
-    Based on paper "Beyond the 80/20 Rule" (2506.01939):
-    - High-entropy tokens are "forking" tokens (decision points)
-    - Low-entropy tokens are "following" tokens (deterministic continuations)
-    - Only top 20% high-entropy tokens drive RLVR learning
+    Inspired by paper "Beyond the 80/20 Rule" (2506.01939), but adapted for GRPO:
+    - Paper uses DAPO with clipped importance ratios (gradients bounded)
+    - GRPO uses raw log_probs (hard masking causes grad explosion)
 
-    This implementation masks the bottom mask_percentile% of tokens by entropy,
-    focusing gradient signal on the high-entropy forking tokens.
+    This implementation uses SOFT weighting instead of hard masking:
+    - weight = normalize(entropy^(1/temp)) over batch
+    - High-entropy tokens get higher weight, low-entropy still contribute
+    - Gradient magnitude stays controlled
 
     Args:
-        mask_percentile: Percentage of low-entropy tokens to mask (default 80.0)
+        entropy_temp: Temperature for softmax weighting (default 1.0)
+                      Lower = more focus on high-entropy, Higher = more uniform
     """
     original_rewards = {id(ep): ep.reward for ep in episodes}
     episodes = normalize_rewards_per_group(episodes)
@@ -650,16 +652,12 @@ def update_policy_entropy_masking(
     num_target_tokens = sum(len(episode.generated_token_ids) for episode in episodes)
     entropy_total = 0.0
 
-    # Track stats for logging
-    total_tokens = 0
-    masked_tokens = 0
-
     logger = get_credit_logger() if log_tokens else None
     episode_counter = 0
 
     for i in range(0, len(episodes), micro_batch_size):
         print(
-            f"\r* Computing policy gradient (entropy-masking): {i:>2d}/{len(episodes):>2d}",
+            f"\r* Computing policy gradient (entropy-weighted): {i:>2d}/{len(episodes):>2d}",
             flush=True,
             end="",
         )
@@ -707,27 +705,29 @@ def update_policy_entropy_masking(
             entropy_total = entropy_total + (token_entropy * target_masks).sum() / num_target_tokens
 
         # ============================================================
-        # MITIGATION: Entropy-based masking
+        # MITIGATION: Soft entropy-based weighting
         # ============================================================
         with torch.no_grad():
-            # Get valid entropy values (where target_masks is True)
-            valid_entropies = token_entropy[target_masks]
+            # Compute entropy weights (soft, not hard masking)
+            # Use softmax over entropy values to get weights that sum to 1
+            # This keeps gradient magnitude similar to baseline
 
-            if len(valid_entropies) > 0:
-                # Find entropy threshold for masking
-                threshold = torch.quantile(valid_entropies, mask_percentile / 100.0)
+            # Mask invalid positions with -inf for softmax
+            entropy_for_softmax = token_entropy.clone()
+            entropy_for_softmax[~target_masks] = float('-inf')
 
-                # Create entropy mask: 1 for high-entropy (keep), 0 for low-entropy (mask)
-                entropy_mask = (token_entropy >= threshold).float()
+            # Apply temperature and softmax across all tokens in batch
+            # Reshape to 1D for softmax, then reshape back
+            flat_entropy = entropy_for_softmax.reshape(-1)
 
-                # Combine with target_masks
-                combined_mask = target_masks.float() * entropy_mask
+            # Softmax with temperature: higher temp = more uniform
+            entropy_weights_flat = F.softmax(flat_entropy / entropy_temp, dim=0)
+            entropy_weights = entropy_weights_flat.reshape(entropy_for_softmax.shape)
 
-                # Track stats
-                total_tokens += target_masks.sum().item()
-                masked_tokens += (target_masks.float() * (1 - entropy_mask)).sum().item()
-            else:
-                combined_mask = target_masks.float()
+            # Scale weights to have mean=1 over valid tokens (preserve gradient scale)
+            valid_count = target_masks.sum()
+            if valid_count > 0:
+                entropy_weights = entropy_weights * valid_count
 
         # Logging
         if log_tokens and logger is not None:
@@ -752,10 +752,11 @@ def update_policy_entropy_masking(
                     )
                     episode_counter += 1
 
-        # Compute loss with entropy mask applied
-        # Only high-entropy tokens contribute to gradient
-        obj = log_probs * batch_advantages[:, None]
-        obj = (obj * combined_mask).sum() / max(combined_mask.sum(), 1.0)
+        # Compute weighted loss
+        # Standard GRPO: (log_prob * advantage * mask).sum() / num_tokens
+        # Entropy-weighted: (log_prob * advantage * entropy_weight).sum() / num_tokens
+        obj = log_probs * batch_advantages[:, None] * entropy_weights
+        obj = obj.sum() / num_target_tokens
         loss = -obj
         loss.backward()
 
@@ -765,14 +766,10 @@ def update_policy_entropy_masking(
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
 
-    # Calculate mask ratio
-    mask_ratio = masked_tokens / total_tokens if total_tokens > 0 else 0.0
-
     metrics = {
         "loss": loss.item(),
         "grad_norm": grad_norm.item(),
         "entropy": entropy_total.item(),
-        "entropy_mask_ratio": mask_ratio,  # How many tokens were masked
     }
 
     if log_tokens and logger is not None:
@@ -795,7 +792,7 @@ def get_update_policy_fn(mitigation: str = "none"):
             - "outcome_conditional": Outcome-Conditional Advantage
             - "inverse_logprob": Inverse Log Prob Weighting
             - "attention_credit": Attention-Based Credit
-            - "entropy_masking": Entropy-Based Masking (paper 2506.01939)
+            - "entropy_weighted": Entropy-Based Soft Weighting (inspired by paper 2506.01939)
 
     Returns:
         update_policy function
@@ -808,7 +805,7 @@ def get_update_policy_fn(mitigation: str = "none"):
         "outcome_conditional": update_policy_outcome_conditional,
         "inverse_logprob": update_policy_inverse_logprob,
         "attention_credit": update_policy_attention_credit,
-        "entropy_masking": update_policy_entropy_masking,
+        "entropy_weighted": update_policy_entropy_weighted,
     }
 
     if mitigation not in mitigations:

@@ -85,29 +85,32 @@ python train_mitigations.py --config config_instrumented.yaml \
 
 ---
 
-### 4. Entropy-Based Masking (Paper 2506.01939)
-**File:** `grpo_mitigations.py::update_policy_entropy_masking`
+### 4. Entropy-Based Soft Weighting (Inspired by Paper 2506.01939)
+**File:** `grpo_mitigations.py::update_policy_entropy_weighted`
 
-**Idea:** Based on "Beyond the 80/20 Rule" paper - only high-entropy "forking" tokens drive RLVR learning. Mask the bottom X% entropy tokens to focus gradient on decision points.
+**Idea:** Based on "Beyond the 80/20 Rule" paper insight that high-entropy "forking" tokens drive RLVR learning.
+
+**Important:** The paper uses DAPO (with clipped importance ratios), not vanilla GRPO. Hard masking in GRPO causes gradient explosion because high-entropy tokens have the most negative log_probs. This implementation uses **soft weighting** instead:
 
 ```python
 # Token entropy H = -Σ p_i log(p_i)
 # High entropy = forking tokens (decision points like "wait", "However")
 # Low entropy = following tokens (deterministic continuations like "25")
-# Only train on top (100-mask_percentile)% high-entropy tokens
+# Soft weighting: weight = softmax(entropy / temp) * num_tokens
+# High-entropy tokens get more weight, but all tokens still contribute
 ```
 
 **Usage:**
 ```bash
 python train_mitigations.py --config config_instrumented.yaml \
-    --mitigation entropy_masking \
-    --mask_percentile 80.0
+    --mitigation entropy_weighted \
+    --entropy_temp 1.0
 ```
 
 **Parameters:**
-- `--mask_percentile`: Percentile of low-entropy tokens to mask (default 80.0, paper uses 80)
+- `--entropy_temp`: Temperature for softmax weighting (default 1.0). Lower = more focus on high-entropy tokens, Higher = more uniform.
 
-**Note:** Paper reports gains scale with model size (32B: +11, 14B: +5, 8B: ~0). At 0.6B, may not see improvement but validates the entropy classification concept.
+**Note:** Paper reports gains scale with model size (32B: +11, 14B: +5, 8B: ~0). At 0.6B, may not see improvement but validates the entropy-weighted approach.
 
 ---
 
