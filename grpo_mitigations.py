@@ -1,12 +1,13 @@
 """
 GRPO Credit Assignment Mitigations
 
-This module provides 3 alternative update_policy implementations with different
+This module provides 4 alternative update_policy implementations with different
 credit assignment strategies:
 
 1. Outcome-Conditional Advantage: Discount advantage for <think> section tokens
 2. Inverse Log Prob Weighting: Weight by 1/(|log_prob| + epsilon)
 3. Attention-Based Credit: Weight by attention from answer tokens
+4. Entropy-Based Masking: Mask bottom X% entropy tokens (from paper 2506.01939)
 
 Each can be used as a drop-in replacement for update_policy in grpo_instrumented.py
 """
@@ -612,6 +613,175 @@ def update_policy_attention_credit(
 
 
 # ============================================================
+# Mitigation 4: Entropy-Based Masking (from paper 2506.01939)
+# ============================================================
+
+def update_policy_entropy_masking(
+    model,
+    optimizer,
+    episodes: List[Episode],
+    micro_batch_size: int,
+    pad_token_id: int,
+    max_grad_norm: float,
+    device: torch.device,
+    dtype: torch.dtype,
+    step: int = 0,
+    log_tokens: bool = True,
+    mask_percentile: float = 80.0,  # Mask bottom X% entropy tokens (paper uses 80%)
+):
+    """
+    GRPO update with Entropy-Based Masking.
+
+    Based on paper "Beyond the 80/20 Rule" (2506.01939):
+    - High-entropy tokens are "forking" tokens (decision points)
+    - Low-entropy tokens are "following" tokens (deterministic continuations)
+    - Only top 20% high-entropy tokens drive RLVR learning
+
+    This implementation masks the bottom mask_percentile% of tokens by entropy,
+    focusing gradient signal on the high-entropy forking tokens.
+
+    Args:
+        mask_percentile: Percentage of low-entropy tokens to mask (default 80.0)
+    """
+    original_rewards = {id(ep): ep.reward for ep in episodes}
+    episodes = normalize_rewards_per_group(episodes)
+    episodes.sort(key=lambda x: len(x.prefix_token_ids) + len(x.generated_token_ids))
+    num_micro_batches = math.ceil(len(episodes) / micro_batch_size)
+    num_target_tokens = sum(len(episode.generated_token_ids) for episode in episodes)
+    entropy_total = 0.0
+
+    # Track stats for logging
+    total_tokens = 0
+    masked_tokens = 0
+
+    logger = get_credit_logger() if log_tokens else None
+    episode_counter = 0
+
+    for i in range(0, len(episodes), micro_batch_size):
+        print(
+            f"\r* Computing policy gradient (entropy-masking): {i:>2d}/{len(episodes):>2d}",
+            flush=True,
+            end="",
+        )
+        j = min(i + micro_batch_size, len(episodes))
+        batch_episodes = episodes[i:j]
+        batch_lengths = [
+            len(episode.prefix_token_ids) + len(episode.generated_token_ids)
+            for episode in batch_episodes
+        ]
+        batch_max_length = max(batch_lengths)
+        batch_token_ids = [
+            episode.prefix_token_ids
+            + episode.generated_token_ids
+            + [pad_token_id] * (batch_max_length - batch_lengths[k])
+            for k, episode in enumerate(batch_episodes)
+        ]
+        batch_masks = [
+            [0] * len(episode.prefix_token_ids)
+            + [1] * len(episode.generated_token_ids)
+            + [0] * (batch_max_length - batch_lengths[k])
+            for k, episode in enumerate(batch_episodes)
+        ]
+        batch_advantages = [episode.reward for episode in batch_episodes]
+        batch_token_ids = torch.tensor(batch_token_ids, device=device, dtype=torch.long)
+        batch_masks = torch.tensor(batch_masks, device=device, dtype=torch.bool)
+        batch_advantages = torch.tensor(
+            batch_advantages, device=device, dtype=torch.float32
+        )
+
+        with torch.autocast(device_type=device.type, dtype=dtype):
+            input_token_ids = batch_token_ids[:, :-1]
+            target_token_ids = batch_token_ids[:, 1:]
+            target_masks = batch_masks[:, 1:]
+            logits = model.forward(input_token_ids).float()
+
+        log_probs = -torch.nn.functional.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            target_token_ids.reshape(-1),
+            ignore_index=pad_token_id,
+            reduction="none",
+        ).reshape(input_token_ids.shape[0], -1)
+
+        with torch.no_grad():
+            token_entropy = compute_entropy(logits)
+            entropy_total = entropy_total + (token_entropy * target_masks).sum() / num_target_tokens
+
+        # ============================================================
+        # MITIGATION: Entropy-based masking
+        # ============================================================
+        with torch.no_grad():
+            # Get valid entropy values (where target_masks is True)
+            valid_entropies = token_entropy[target_masks]
+
+            if len(valid_entropies) > 0:
+                # Find entropy threshold for masking
+                threshold = torch.quantile(valid_entropies, mask_percentile / 100.0)
+
+                # Create entropy mask: 1 for high-entropy (keep), 0 for low-entropy (mask)
+                entropy_mask = (token_entropy >= threshold).float()
+
+                # Combine with target_masks
+                combined_mask = target_masks.float() * entropy_mask
+
+                # Track stats
+                total_tokens += target_masks.sum().item()
+                masked_tokens += (target_masks.float() * (1 - entropy_mask)).sum().item()
+            else:
+                combined_mask = target_masks.float()
+
+        # Logging
+        if log_tokens and logger is not None:
+            with torch.no_grad():
+                for batch_idx, episode in enumerate(batch_episodes):
+                    gen_len = len(episode.generated_token_ids)
+                    prompt_len = len(episode.prefix_token_ids)
+                    start_idx = prompt_len - 1 if prompt_len > 0 else 0
+                    end_idx = start_idx + gen_len
+                    token_log_probs = log_probs[batch_idx, start_idx:end_idx]
+                    token_entropies = token_entropy[batch_idx, start_idx:end_idx]
+
+                    logger.log_tokens(
+                        step=step,
+                        episode_idx=episode_counter,
+                        token_ids=episode.generated_token_ids,
+                        log_probs=token_log_probs[:len(episode.generated_token_ids)],
+                        advantage=batch_advantages[batch_idx].item(),
+                        reward=episode.reward_info.get('reward', episode.reward) if hasattr(episode, 'reward_info') else episode.reward,
+                        normalized_reward=episode.reward,
+                        entropies=token_entropies[:len(episode.generated_token_ids)],
+                    )
+                    episode_counter += 1
+
+        # Compute loss with entropy mask applied
+        # Only high-entropy tokens contribute to gradient
+        obj = log_probs * batch_advantages[:, None]
+        obj = (obj * combined_mask).sum() / max(combined_mask.sum(), 1.0)
+        loss = -obj
+        loss.backward()
+
+    grad_norm = torch.nn.utils.clip_grad_norm_(
+        model.parameters(), max_norm=max_grad_norm
+    )
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+
+    # Calculate mask ratio
+    mask_ratio = masked_tokens / total_tokens if total_tokens > 0 else 0.0
+
+    metrics = {
+        "loss": loss.item(),
+        "grad_norm": grad_norm.item(),
+        "entropy": entropy_total.item(),
+        "entropy_mask_ratio": mask_ratio,  # How many tokens were masked
+    }
+
+    if log_tokens and logger is not None:
+        logger.log_step_summary(step, episodes, metrics)
+
+    return metrics
+
+
+# ============================================================
 # Factory function to select mitigation
 # ============================================================
 
@@ -625,6 +795,7 @@ def get_update_policy_fn(mitigation: str = "none"):
             - "outcome_conditional": Outcome-Conditional Advantage
             - "inverse_logprob": Inverse Log Prob Weighting
             - "attention_credit": Attention-Based Credit
+            - "entropy_masking": Entropy-Based Masking (paper 2506.01939)
 
     Returns:
         update_policy function
@@ -637,6 +808,7 @@ def get_update_policy_fn(mitigation: str = "none"):
         "outcome_conditional": update_policy_outcome_conditional,
         "inverse_logprob": update_policy_inverse_logprob,
         "attention_credit": update_policy_attention_credit,
+        "entropy_masking": update_policy_entropy_masking,
     }
 
     if mitigation not in mitigations:

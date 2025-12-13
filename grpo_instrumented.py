@@ -35,6 +35,7 @@ class TokenGradientLog:
     contribution: float  # advantage * log_prob
     reward: float  # Original reward before normalization
     normalized_reward: float  # After group normalization
+    entropy: float = 0.0  # Token entropy at generation time (for forking/following analysis)
 
 
 @dataclass
@@ -52,12 +53,15 @@ class CreditAssignmentLogger:
         advantage: float,
         reward: float,
         normalized_reward: float,
+        entropies: Optional[torch.Tensor] = None,  # (seq_len,) - per-token entropy
     ):
         """Log gradient info for all tokens in an episode."""
         log_probs_np = log_probs.detach().cpu().numpy()
+        entropies_np = entropies.detach().cpu().numpy() if entropies is not None else None
 
         for pos, (token_id, log_prob) in enumerate(zip(token_ids, log_probs_np)):
             contribution = advantage * log_prob
+            entropy_val = float(entropies_np[pos]) if entropies_np is not None and pos < len(entropies_np) else 0.0
             self.logs.append(TokenGradientLog(
                 step=step,
                 episode_idx=episode_idx,
@@ -68,6 +72,7 @@ class CreditAssignmentLogger:
                 contribution=float(contribution),
                 reward=float(reward),
                 normalized_reward=float(normalized_reward),
+                entropy=entropy_val,
             ))
 
     def log_step_summary(self, step: int, episodes: List[Episode], metrics: dict):
@@ -339,7 +344,7 @@ def update_policy(
             entropy = entropy + (token_entropy * target_masks).sum() / num_target_tokens
 
         # ============================================================
-        # INSTRUMENTATION: Log per-token contributions
+        # INSTRUMENTATION: Log per-token contributions with entropy
         # ============================================================
         if log_tokens and logger is not None:
             with torch.no_grad():
@@ -358,6 +363,8 @@ def update_policy(
                     end_idx = start_idx + gen_len
 
                     token_log_probs = log_probs[batch_idx, start_idx:end_idx]
+                    # Extract entropy for generated tokens (same indexing as log_probs)
+                    token_entropies = token_entropy[batch_idx, start_idx:end_idx]
 
                     # Find original reward (before normalization)
                     # We need to match by episode content since sorting changed order
@@ -374,6 +381,7 @@ def update_policy(
                         advantage=batch_advantages[batch_idx].item(),
                         reward=episode.reward_info.get('reward', episode.reward) if hasattr(episode, 'reward_info') else episode.reward,
                         normalized_reward=episode.reward,
+                        entropies=token_entropies[:len(episode.generated_token_ids)],
                     )
                     episode_counter += 1
         # ============================================================

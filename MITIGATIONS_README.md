@@ -1,6 +1,6 @@
 # GRPO Credit Assignment Mitigations
 
-This directory contains 3 experimental mitigation strategies for the credit assignment inefficiency discovered in standard GRPO.
+This directory contains 4 experimental mitigation strategies for the credit assignment inefficiency discovered in standard GRPO.
 
 ## Background
 
@@ -85,6 +85,32 @@ python train_mitigations.py --config config_instrumented.yaml \
 
 ---
 
+### 4. Entropy-Based Masking (Paper 2506.01939)
+**File:** `grpo_mitigations.py::update_policy_entropy_masking`
+
+**Idea:** Based on "Beyond the 80/20 Rule" paper - only high-entropy "forking" tokens drive RLVR learning. Mask the bottom X% entropy tokens to focus gradient on decision points.
+
+```python
+# Token entropy H = -Σ p_i log(p_i)
+# High entropy = forking tokens (decision points like "wait", "However")
+# Low entropy = following tokens (deterministic continuations like "25")
+# Only train on top (100-mask_percentile)% high-entropy tokens
+```
+
+**Usage:**
+```bash
+python train_mitigations.py --config config_instrumented.yaml \
+    --mitigation entropy_masking \
+    --mask_percentile 80.0
+```
+
+**Parameters:**
+- `--mask_percentile`: Percentile of low-entropy tokens to mask (default 80.0, paper uses 80)
+
+**Note:** Paper reports gains scale with model size (32B: +11, 14B: +5, 8B: ~0). At 0.6B, may not see improvement but validates the entropy classification concept.
+
+---
+
 ## Running Experiments
 
 ### Baseline (No Mitigation)
@@ -109,6 +135,11 @@ python train_mitigations.py --config config_instrumented.yaml --mitigation inver
 
 # Attention-based credit
 python train_mitigations.py --config config_instrumented.yaml --mitigation attention_credit --credit_scale 2.0
+
+# Entropy-based masking (paper 2506.01939)
+python train_mitigations.py --config config_instrumented.yaml --mitigation entropy_masking --mask_percentile 80.0
+python train_mitigations.py --config config_instrumented.yaml --mitigation entropy_masking --mask_percentile 70.0
+python train_mitigations.py --config config_instrumented.yaml --mitigation entropy_masking --mask_percentile 90.0
 ```
 
 ### Analyzing Results
@@ -150,10 +181,11 @@ ckpt_outcome_conditional/        # Model checkpoints
 | Outcome-Conditional | More credit to answer, may hurt reasoning if discount too strong |
 | Inverse Log Prob | Equalized credit, may destabilize training |
 | Attention-Based | Principled credit based on model's own attention |
+| Entropy-Based | Focus on forking tokens, but gains scale with model size (may need >8B to see improvement) |
 
 ## Files
 
-- `grpo_mitigations.py` - All 3 mitigation implementations
+- `grpo_mitigations.py` - All 4 mitigation implementations
 - `train_mitigations.py` - Training script with mitigation selection
 - `analyze_credit.py` - Analysis script for comparing results
 - `CREDIT_ASSIGNMENT_ANALYSIS.md` - Full analysis writeup

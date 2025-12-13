@@ -505,7 +505,71 @@ Position 80-100%:
 
 ---
 
-## Appendix B: What We Did Wrong (First Attempt)
+## Appendix B: Mitigation Experiment Results
+
+We implemented and tested 3 credit assignment mitigations. Results below.
+
+### Summary Table
+
+| Mitigation | Eval @ 100 | Filler |contrib| | Reasoning |contrib| | Ratio |
+|------------|------------|-----------------|-------------------|-------|
+| **Baseline** | **15%** | 0.333 | 0.254 | 1.31x |
+| Outcome-conditional (0.5) | 12% | - | - | - |
+| Outcome-conditional (0.75) | 12% | 0.348 | 0.247 | 1.41x |
+| Inverse logprob (0.1) | 0% @ 60 | - | - | Broken |
+
+### Outcome-Conditional Advantage (0.75 discount)
+
+**Implementation:** Tokens in `<think>` section get 75% of advantage, `<answer>` tokens get 100%.
+
+**Results:**
+- Eval accuracy: 12% (vs 15% baseline) - **WORSE**
+- Filler still gets 41% more gradient than reasoning (vs 31% baseline)
+- Position effect flipped: late tokens now get 3x MORE gradient than early
+
+**Position-Controlled Token Type Analysis:**
+| Position | Filler |contrib| | Reasoning |contrib| |
+|----------|-----------------|-------------------|
+| 0-20% | 0.386 | 0.244 |
+| 20-40% | 0.380 | 0.190 |
+| 40-60% | 0.345 | 0.357 |
+| 60-80% | 0.378 | 0.242 |
+| 80-100% | 0.235 | 0.237 |
+
+**Conclusion:** Discounting think section hurts performance. The reasoning tokens in think section are important for learning correct answers.
+
+### Inverse Log Prob Weighting (epsilon=0.1)
+
+**Implementation:** Weight contribution by `1/(|log_prob| + 0.1)` to equalize gradient magnitude.
+
+**Results:**
+- Eval accuracy: 0% at step 60 - **BROKEN**
+- Grad norm collapsed to 0.6-0.7 (vs 2-3 baseline)
+- Training completely destabilized
+
+**Conclusion:** Removing the log_prob signal breaks training. The model's confidence is actually useful information.
+
+### Key Takeaways
+
+1. **Filler gradient is not wasteful** - Reducing it hurts performance
+2. **Think section credit matters** - Even "filler" in reasoning helps format learning
+3. **Log prob signal is essential** - Can't just equalize gradient magnitude
+4. **GRPO's credit assignment works** - Despite appearing "inefficient", it learns
+
+### Implications for Future Work
+
+The mitigations we tried were too blunt:
+- Outcome-conditional discounts ALL think tokens (including useful reasoning)
+- Inverse logprob removes confidence signal entirely
+
+More sophisticated approaches might:
+- Distinguish filler from reasoning WITHIN sections (not just by section)
+- Use attention to identify causally important tokens
+- Learn token importance rather than using heuristics
+
+---
+
+## Appendix C: What We Did Wrong (Phase 1)
 
 ### Issue 1: Wrong Gradient Measured
 
@@ -533,7 +597,7 @@ Used GRPO-Zero to measure `contribution = advantage × log_prob` DURING training
 
 ---
 
-## Appendix C: Related Work
+## Appendix D: Related Work
 
 ### GTPO (Token-Level Entropy Rewards)
 Uses entropy to weight token importance - higher entropy = more uncertain = more important.
